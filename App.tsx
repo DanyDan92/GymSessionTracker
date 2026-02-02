@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import { WorkoutSession, ExerciseTemplate } from "./types";
 import useLocalStorage from "./hooks/useLocalStorage";
 
@@ -44,6 +44,9 @@ const App: React.FC = () => {
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
 
+  // Évite d'auto-push juste après un pull (sinon boucle)
+  const skipNextAutoPushRef = useRef(false);
+
   /* =====================
      ✅ CALLBACKS
   ===================== */
@@ -56,9 +59,7 @@ const App: React.FC = () => {
     (session: WorkoutSession) => {
       setSessions((prev) => {
         const exists = prev.some((s) => s.id === session.id);
-        if (exists) {
-          return prev.map((s) => (s.id === session.id ? session : s));
-        }
+        if (exists) return prev.map((s) => (s.id === session.id ? session : s));
         return [...prev, session];
       });
     },
@@ -77,11 +78,7 @@ const App: React.FC = () => {
     (template: ExerciseTemplate) => {
       setTemplates((prev) => {
         const exists = prev.some((t) => t.id === template.id);
-        if (exists) {
-          return prev.map((t) =>
-            t.id === template.id ? template : t
-          );
-        }
+        if (exists) return prev.map((t) => (t.id === template.id ? template : t));
         return [...prev, template];
       });
     },
@@ -100,16 +97,21 @@ const App: React.FC = () => {
   }, []);
 
   /* =====================
-     ☁️ SYNC ACTIONS
+     ☁️ SYNC MANUEL (boutons)
   ===================== */
   const handleSyncPull = useCallback(async () => {
     setSyncing(true);
     setSyncMsg("Téléchargement des données...");
     try {
       const cloud = await pullUserData();
+
+      // Important : on évite de re-push automatiquement juste après ce pull
+      skipNextAutoPushRef.current = true;
+
       setSessions(cloud.sessions as WorkoutSession[]);
       setTemplates(cloud.templates as ExerciseTemplate[]);
       setSyncMsg("✅ Données récupérées depuis le cloud");
+      setTimeout(() => setSyncMsg(null), 1500);
     } catch (e: any) {
       setSyncMsg("❌ Erreur sync ↓ : " + (e?.message ?? String(e)));
     } finally {
@@ -126,6 +128,7 @@ const App: React.FC = () => {
         templates as ExerciseTemplate[]
       );
       setSyncMsg("✅ Données envoyées vers le cloud");
+      setTimeout(() => setSyncMsg(null), 1500);
     } catch (e: any) {
       setSyncMsg("❌ Erreur sync ↑ : " + (e?.message ?? String(e)));
     } finally {
@@ -142,16 +145,69 @@ const App: React.FC = () => {
       setReady(true);
     });
 
-    const { data: sub } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        setSignedIn(!!session);
-      }
-    );
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSignedIn(!!session);
+    });
 
-    return () => {
-      sub.subscription.unsubscribe();
-    };
+    return () => sub.subscription.unsubscribe();
   }, []);
+
+  /* =====================
+     ✅ AUTO-PULL au login
+  ===================== */
+  useEffect(() => {
+    if (!ready || !signedIn) return;
+
+    (async () => {
+      setSyncing(true);
+      setSyncMsg("Synchronisation…");
+      try {
+        const cloud = await pullUserData();
+
+        // Évite auto-push juste après pull
+        skipNextAutoPushRef.current = true;
+
+        setSessions(cloud.sessions as WorkoutSession[]);
+        setTemplates(cloud.templates as ExerciseTemplate[]);
+        setSyncMsg(null);
+      } catch (e: any) {
+        setSyncMsg("❌ Sync auto: " + (e?.message ?? String(e)));
+      } finally {
+        setSyncing(false);
+      }
+    })();
+  }, [ready, signedIn, setSessions, setTemplates]);
+
+  /* =====================
+     ✅ AUTO-PUSH debounced
+     (1.2s après la dernière modif)
+  ===================== */
+  useEffect(() => {
+    if (!ready || !signedIn) return;
+
+    // Si on vient de faire un pull, on skip une fois
+    if (skipNextAutoPushRef.current) {
+      skipNextAutoPushRef.current = false;
+      return;
+    }
+
+    const t = setTimeout(() => {
+      (async () => {
+        try {
+          await pushUserData(
+            sessions as WorkoutSession[],
+            templates as ExerciseTemplate[]
+          );
+          // silencieux (pas de msg à chaque save)
+        } catch (e) {
+          // option : afficher une erreur si tu veux
+          // setSyncMsg("❌ Auto-save: " + (e as any)?.message);
+        }
+      })();
+    }, 1200);
+
+    return () => clearTimeout(t);
+  }, [ready, signedIn, sessions, templates]);
 
   /* =====================
      ⛔ GUARDS
@@ -187,13 +243,10 @@ const App: React.FC = () => {
             onSaveSession={handleSaveSession}
             onSaveTemplate={handleSaveTemplate}
             onBack={() => {
-              const session = sessions.find(
-                (s) => s.id === selectedSessionId
-              );
+              const session = sessions.find((s) => s.id === selectedSessionId);
               if (
                 session &&
-                (session.isCompleted ||
-                  new Date(session.date) < today)
+                (session.isCompleted || new Date(session.date) < today)
               ) {
                 setCurrentView("HISTORY");
               } else {
@@ -253,6 +306,7 @@ const App: React.FC = () => {
               onClick={handleSyncPull}
               disabled={syncing}
               className="text-sm px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-700/50 disabled:opacity-50"
+              title="Récupérer depuis le cloud"
             >
               Sync ↓
             </button>
@@ -261,6 +315,7 @@ const App: React.FC = () => {
               onClick={handleSyncPush}
               disabled={syncing}
               className="text-sm px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-700/50 disabled:opacity-50"
+              title="Envoyer vers le cloud"
             >
               Sync ↑
             </button>
@@ -273,6 +328,12 @@ const App: React.FC = () => {
             </button>
           </div>
         </div>
+
+        {syncMsg && (
+          <div className="max-w-4xl mx-auto px-4 pb-2 text-sm text-gray-300">
+            {syncMsg}
+          </div>
+        )}
 
         <nav className="flex justify-center gap-4 border-t border-gray-700">
           <button
@@ -308,12 +369,6 @@ const App: React.FC = () => {
             <DumbbellIcon /> Exercices
           </button>
         </nav>
-
-        {syncMsg && (
-          <div className="max-w-4xl mx-auto px-4 py-2 text-sm text-gray-300">
-            {syncMsg}
-          </div>
-        )}
       </header>
 
       <main className="flex-grow p-4 md:p-8">
