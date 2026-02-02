@@ -20,6 +20,20 @@ const App: React.FC = () => {
   const [ready, setReady] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
 
+  /* =====================
+     📦 LOCAL STORAGE
+     (⚠️ DOIT rester avant les return conditionnels)
+  ===================== */
+  const [sessions, setSessions] = useLocalStorage<WorkoutSession[]>('sessions', []);
+  const [templates, setTemplates] = useLocalStorage<ExerciseTemplate[]>('exerciseTemplates', []);
+
+  /* =====================
+     🧭 NAVIGATION STATE
+     (⚠️ DOIT rester avant les return conditionnels)
+  ===================== */
+  const [currentView, setCurrentView] = useState<View>('SESSIONS_LIST');
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       setSignedIn(!!data.session);
@@ -35,20 +49,9 @@ const App: React.FC = () => {
     };
   }, []);
 
+  // ✅ Maintenant c'est safe : tous les hooks ont déjà été appelés
   if (!ready) return null;
   if (!signedIn) return <Auth />;
-
-  /* =====================
-     📦 LOCAL STORAGE
-  ===================== */
-  const [sessions, setSessions] = useLocalStorage<WorkoutSession[]>('sessions', []);
-  const [templates, setTemplates] = useLocalStorage<ExerciseTemplate[]>('exerciseTemplates', []);
-
-  /* =====================
-     🧭 NAVIGATION STATE
-  ===================== */
-  const [currentView, setCurrentView] = useState<View>('SESSIONS_LIST');
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
 
   const handleSelectSession = (id: string) => {
     setSelectedSessionId(id);
@@ -84,9 +87,6 @@ const App: React.FC = () => {
     setTemplates(prev => prev.filter(t => t.id !== id));
   }, [setTemplates]);
 
-  /* =====================
-     🖼️ RENDER VIEW
-  ===================== */
   const renderView = () => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -157,9 +157,6 @@ const App: React.FC = () => {
     }
   };
 
-  /* =====================
-     🧱 UI
-  ===================== */
   return (
     <div className="min-h-screen bg-gray-900 text-gray-200 font-sans flex flex-col">
       <header className="bg-gray-800/70 backdrop-blur-sm sticky top-0 z-20 shadow-lg">
