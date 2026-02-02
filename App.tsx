@@ -16,19 +16,17 @@ import { pullUserData, pushUserData } from "./sync";
 
 type View = "SESSIONS_LIST" | "SESSION_DETAIL" | "EXERCISE_LIBRARY" | "HISTORY";
 
-// ---------- helpers (merge & timestamps) ----------
-function nowIso() {
-  return new Date().toISOString();
-}
-
+/* =====================
+   MERGE / CONFLICT RESOLUTION
+   - 1 item = 1 id
+   - on garde l'item le plus récent (updatedAt)
+===================== */
 function getUpdatedAt(x: any): number {
   const v = x?.updatedAt ?? x?.updated_at ?? null;
   const t = v ? Date.parse(v) : 0;
   return Number.isFinite(t) ? t : 0;
 }
 
-// Merge par id : conserve l’item le plus récent (updatedAt)
-// + ajoute les items manquants
 function mergeById<T extends { id: string }>(localArr: any[], cloudArr: any[]): T[] {
   const map = new Map<string, any>();
 
@@ -48,6 +46,10 @@ function mergeById<T extends { id: string }>(localArr: any[], cloudArr: any[]): 
   }
 
   return Array.from(map.values());
+}
+
+function nowIso() {
+  return new Date().toISOString();
 }
 
 const App: React.FC = () => {
@@ -70,26 +72,22 @@ const App: React.FC = () => {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
 
   /* =====================
-     ☁️ SYNC STATE
+     ☁️ SYNC REFS (discrets)
   ===================== */
-  const [syncing, setSyncing] = useState(false);
-  const [syncMsg, setSyncMsg] = useState<string | null>(null);
-
-  // évite boucle pull -> push
-  const skipNextAutoPushRef = useRef(false);
-
-  // dernier updated_at du cloud qu’on a appliqué
+  const pullingRef = useRef(false);
+  const didLoginPullRef = useRef(false);
+  const didFirstInteractionPullRef = useRef(false);
   const lastAppliedCloudUpdatedAtRef = useRef<number>(0);
 
   /* =====================
-     ✅ CALLBACKS
+     ✅ CALLBACKS (no hooks in conditional)
   ===================== */
   const handleSelectSession = useCallback((id: string) => {
     setSelectedSessionId(id);
     setCurrentView("SESSION_DETAIL");
   }, []);
 
-  // IMPORTANT : on “stamp” updatedAt à chaque save
+  // Stamp updatedAt à chaque modification locale
   const handleSaveSession = useCallback(
     (session: WorkoutSession) => {
       const stamped = { ...(session as any), updatedAt: nowIso() } as WorkoutSession;
@@ -105,8 +103,6 @@ const App: React.FC = () => {
 
   const handleDeleteSession = useCallback(
     (id: string) => {
-      // (option : tu peux marquer deletedAt plutôt que supprimer,
-      // mais on reste simple)
       setSessions((prev) => prev.filter((s) => s.id !== id));
       setCurrentView("SESSIONS_LIST");
     },
@@ -133,66 +129,54 @@ const App: React.FC = () => {
     [setTemplates]
   );
 
-  const handleSignOut = useCallback(async () => {
-    await supabase.auth.signOut();
-  }, []);
-
   /* =====================
-     ☁️ APPLY CLOUD (merge)
+     APPLY CLOUD (merge discret)
   ===================== */
   const applyCloudData = useCallback(
     (cloudSessions: any[], cloudTemplates: any[], cloudUpdatedAt: string | null) => {
       const cloudUpdatedAtNum = cloudUpdatedAt ? Date.parse(cloudUpdatedAt) : 0;
 
-      // si pas plus récent que ce qu’on a déjà appliqué, on peut ignorer
+      // Ignore si cloud pas plus récent
       if (cloudUpdatedAtNum && cloudUpdatedAtNum <= lastAppliedCloudUpdatedAtRef.current) {
         return;
       }
 
-      // merge cloud -> local (par id & updatedAt)
-      const mergedSessions = mergeById<WorkoutSession>(sessions as any[], cloudSessions as any[]);
-      const mergedTemplates = mergeById<ExerciseTemplate>(templates as any[], cloudTemplates as any[]);
-
-      // on évite auto-push immédiat causé par setState
-      skipNextAutoPushRef.current = true;
-
-      setSessions(mergedSessions);
-      setTemplates(mergedTemplates);
+      setSessions((prev) => mergeById<WorkoutSession>(prev as any[], cloudSessions as any[]));
+      setTemplates((prev) =>
+        mergeById<ExerciseTemplate>(prev as any[], cloudTemplates as any[])
+      );
 
       lastAppliedCloudUpdatedAtRef.current = cloudUpdatedAtNum || Date.now();
     },
-    [sessions, templates, setSessions, setTemplates]
+    [setSessions, setTemplates]
   );
 
   /* =====================
-     ☁️ SYNC MANUEL (boutons)
+     PULL DISCRET (avec lock)
   ===================== */
-  const handleSyncPull = useCallback(async () => {
-    setSyncing(true);
-    setSyncMsg("Téléchargement des données...");
+  const safePull = useCallback(async () => {
+    if (pullingRef.current) return;
+    pullingRef.current = true;
     try {
       const cloud = await pullUserData();
       applyCloudData(cloud.sessions, cloud.templates, cloud.updated_at);
-      setSyncMsg("✅ Données cloud appliquées (merge)");
-      setTimeout(() => setSyncMsg(null), 1500);
-    } catch (e: any) {
-      setSyncMsg("❌ Erreur sync ↓ : " + (e?.message ?? String(e)));
+    } catch {
+      // silencieux
     } finally {
-      setSyncing(false);
+      pullingRef.current = false;
     }
   }, [applyCloudData]);
 
-  const handleSyncPush = useCallback(async () => {
-    setSyncing(true);
-    setSyncMsg("Envoi des données...");
+  /* =====================
+     PUSH (uniquement via bouton "Sauvegarder")
+  ===================== */
+  const handleSaveToCloud = useCallback(async () => {
     try {
       await pushUserData(sessions as any, templates as any);
-      setSyncMsg("✅ Données envoyées vers le cloud");
-      setTimeout(() => setSyncMsg(null), 1500);
-    } catch (e: any) {
-      setSyncMsg("❌ Erreur sync ↑ : " + (e?.message ?? String(e)));
-    } finally {
-      setSyncing(false);
+      // invisible : pas de message UI
+    } catch {
+      // invisible : pas de message UI
+      // (si tu veux, on peut logger console.error)
     }
   }, [sessions, templates]);
 
@@ -213,77 +197,52 @@ const App: React.FC = () => {
   }, []);
 
   /* =====================
-     ✅ AUTO-PULL au login (avec merge)
+     ✅ PULL à la connexion (1 fois)
   ===================== */
   useEffect(() => {
     if (!ready || !signedIn) return;
+    if (didLoginPullRef.current) return;
+    didLoginPullRef.current = true;
 
-    (async () => {
-      setSyncing(true);
-      setSyncMsg("Synchronisation…");
-      try {
-        const cloud = await pullUserData();
-        applyCloudData(cloud.sessions, cloud.templates, cloud.updated_at);
-        setSyncMsg(null);
-      } catch (e: any) {
-        setSyncMsg("❌ Sync auto: " + (e?.message ?? String(e)));
-      } finally {
-        setSyncing(false);
-      }
-    })();
-  }, [ready, signedIn, applyCloudData]);
+    safePull();
+  }, [ready, signedIn, safePull]);
 
   /* =====================
-     ✅ AUTO-PUSH debounced
-  ===================== */
-  useEffect(() => {
-    if (!ready || !signedIn) return;
-    if (syncing) return; // ✅ évite push pendant pull
-  
-    if (skipNextAutoPushRef.current) {
-      skipNextAutoPushRef.current = false;
-      return;
-    }
-  
-    const t = setTimeout(() => {
-      (async () => {
-        try {
-          await pushUserData(sessions as any, templates as any);
-        } catch {
-          // silencieux
-        }
-      })();
-    }, 1200);
-  
-    return () => clearTimeout(t);
-  }, [ready, signedIn, syncing, sessions, templates]);
-
-  /* =====================
-     ✅ AUTO-PULL périodique (toutes les 20s)
-     - Pull cloud
-     - Si plus récent : merge dans local
+     ✅ PULL au premier clic/tap (1 fois)
+     (utile si cloud change pendant que l'app est ouverte)
   ===================== */
   useEffect(() => {
     if (!ready || !signedIn) return;
 
-    const interval = setInterval(async () => {
-      try {
-        const cloud = await pullUserData();
-        // merge uniquement si cloud est nouveau
-        applyCloudData(cloud.sessions, cloud.templates, cloud.updated_at);
-      } catch {
-        // silencieux
-      }
-    }, 20000);
+    const onFirstInteraction = () => {
+      if (didFirstInteractionPullRef.current) return;
+      didFirstInteractionPullRef.current = true;
+      safePull();
+    };
 
-    return () => clearInterval(interval);
-  }, [ready, signedIn, applyCloudData]);
+    window.addEventListener("pointerdown", onFirstInteraction, { passive: true });
+    window.addEventListener("keydown", onFirstInteraction);
+
+    return () => {
+      window.removeEventListener("pointerdown", onFirstInteraction);
+      window.removeEventListener("keydown", onFirstInteraction);
+    };
+  }, [ready, signedIn, safePull]);
 
   /* =====================
      ⛔ GUARDS
   ===================== */
   if (!ready) return null;
   if (!signedIn) return <Auth />;
+
+  /* =====================
+     VIEW SWITCH (pull discret au changement d’onglet)
+  ===================== */
+  const setViewWithPull = (v: View) => {
+    setCurrentView(v);
+    // pull discret à chaque changement de tab
+    safePull();
+  };
 
   /* =====================
      🖼️ RENDER VIEW
@@ -370,41 +329,31 @@ const App: React.FC = () => {
 
           <div className="flex items-center gap-2">
             <button
-              onClick={handleSyncPull}
-              disabled={syncing}
-              className="text-sm px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-700/50 disabled:opacity-50"
-              title="Récupérer depuis le cloud"
+              onClick={handleSaveToCloud}
+              className="text-sm px-3 py-2 rounded-xl bg-emerald-500 text-gray-900 font-semibold hover:bg-emerald-400 transition"
+              title="Envoie tes données vers le cloud"
             >
-              Sync ↓
+              Sauvegarder
             </button>
 
             <button
-              onClick={handleSyncPush}
-              disabled={syncing}
-              className="text-sm px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-700/50 disabled:opacity-50"
-              title="Envoyer vers le cloud"
-            >
-              Sync ↑
-            </button>
-
-            <button
-              onClick={handleSignOut}
-              className="text-sm px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-700/50"
+              onClick={async () => {
+                // reset flags pour confirmer une sync propre à la prochaine connexion
+                didLoginPullRef.current = false;
+                didFirstInteractionPullRef.current = false;
+                lastAppliedCloudUpdatedAtRef.current = 0;
+                await supabase.auth.signOut();
+              }}
+              className="text-sm px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-700/50 transition"
             >
               Déconnexion
             </button>
           </div>
         </div>
 
-        {syncMsg && (
-          <div className="max-w-4xl mx-auto px-4 pb-2 text-sm text-gray-300">
-            {syncMsg}
-          </div>
-        )}
-
         <nav className="flex justify-center gap-4 border-t border-gray-700">
           <button
-            onClick={() => setCurrentView("SESSIONS_LIST")}
+            onClick={() => setViewWithPull("SESSIONS_LIST")}
             className={`flex items-center gap-2 px-4 py-3 text-sm border-b-2 ${
               currentView === "SESSIONS_LIST"
                 ? "border-emerald-400 text-emerald-400"
@@ -415,7 +364,7 @@ const App: React.FC = () => {
           </button>
 
           <button
-            onClick={() => setCurrentView("HISTORY")}
+            onClick={() => setViewWithPull("HISTORY")}
             className={`flex items-center gap-2 px-4 py-3 text-sm border-b-2 ${
               currentView === "HISTORY"
                 ? "border-emerald-400 text-emerald-400"
@@ -426,7 +375,7 @@ const App: React.FC = () => {
           </button>
 
           <button
-            onClick={() => setCurrentView("EXERCISE_LIBRARY")}
+            onClick={() => setViewWithPull("EXERCISE_LIBRARY")}
             className={`flex items-center gap-2 px-4 py-3 text-sm border-b-2 ${
               currentView === "EXERCISE_LIBRARY"
                 ? "border-emerald-400 text-emerald-400"
