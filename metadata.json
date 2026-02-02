@@ -1,0 +1,5 @@
+{
+  "name": "Gym Session Tracker",
+  "description": "A modern web application to create, manage, and track your gym workout sessions with detailed exercise parameters and built-in timers.",
+  "requestFramePermissions": []
+}
