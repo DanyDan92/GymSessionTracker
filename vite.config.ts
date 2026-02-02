@@ -1,33 +1,28 @@
 import path from "path";
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, ".", "");
+export default defineConfig({
+  plugins: [react()],
+  base: "./",
 
-  return {
-    server: {
-      port: 3000,
-      host: "0.0.0.0",
+  // ✅ Force Vite à ne garder qu'une seule instance de React
+  resolve: {
+    dedupe: ["react", "react-dom"],
+    alias: {
+      "@": path.resolve(__dirname, "."),
     },
-    plugins: [react()],
+  },
 
-    // ✅ Très important sur Cloudflare Pages
-    base: "./",
+  // ✅ Force le prebundle unique côté dev/build
+  optimizeDeps: {
+    include: ["react", "react-dom"],
+  },
 
-    // ⚠️ Tu n'utilises plus Gemini, mais je laisse tes define au cas où
-    define: {
-      "process.env.API_KEY": JSON.stringify(env.GEMINI_API_KEY),
-      "process.env.GEMINI_API_KEY": JSON.stringify(env.GEMINI_API_KEY),
+  // (optionnel mais aide parfois sur certaines stacks)
+  build: {
+    commonjsOptions: {
+      transformMixedEsModules: true,
     },
-
-    resolve: {
-      // ✅ Fix React double-instance (erreur #310)
-      dedupe: ["react", "react-dom"],
-
-      alias: {
-        "@": path.resolve(__dirname, "."),
-      },
-    },
-  };
+  },
 });
