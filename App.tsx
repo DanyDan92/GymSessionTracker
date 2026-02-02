@@ -16,6 +16,40 @@ import { pullUserData, pushUserData } from "./sync";
 
 type View = "SESSIONS_LIST" | "SESSION_DETAIL" | "EXERCISE_LIBRARY" | "HISTORY";
 
+// ---------- helpers (merge & timestamps) ----------
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function getUpdatedAt(x: any): number {
+  const v = x?.updatedAt ?? x?.updated_at ?? null;
+  const t = v ? Date.parse(v) : 0;
+  return Number.isFinite(t) ? t : 0;
+}
+
+// Merge par id : conserve l’item le plus récent (updatedAt)
+// + ajoute les items manquants
+function mergeById<T extends { id: string }>(localArr: any[], cloudArr: any[]): T[] {
+  const map = new Map<string, any>();
+
+  for (const item of localArr ?? []) {
+    if (item?.id) map.set(item.id, item);
+  }
+
+  for (const c of cloudArr ?? []) {
+    if (!c?.id) continue;
+    const l = map.get(c.id);
+    if (!l) {
+      map.set(c.id, c);
+    } else {
+      const keepCloud = getUpdatedAt(c) > getUpdatedAt(l);
+      map.set(c.id, keepCloud ? c : l);
+    }
+  }
+
+  return Array.from(map.values());
+}
+
 const App: React.FC = () => {
   /* =====================
      🔐 AUTH STATE
@@ -26,17 +60,14 @@ const App: React.FC = () => {
   /* =====================
      📦 LOCAL STORAGE
   ===================== */
-  const [sessions, setSessions] =
-    useLocalStorage<WorkoutSession[]>("sessions", []);
-  const [templates, setTemplates] =
-    useLocalStorage<ExerciseTemplate[]>("exerciseTemplates", []);
+  const [sessions, setSessions] = useLocalStorage<WorkoutSession[]>("sessions", []);
+  const [templates, setTemplates] = useLocalStorage<ExerciseTemplate[]>("exerciseTemplates", []);
 
   /* =====================
      🧭 NAVIGATION STATE
   ===================== */
   const [currentView, setCurrentView] = useState<View>("SESSIONS_LIST");
-  const [selectedSessionId, setSelectedSessionId] =
-    useState<string | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
 
   /* =====================
      ☁️ SYNC STATE
@@ -44,8 +75,11 @@ const App: React.FC = () => {
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
 
-  // Évite d'auto-push juste après un pull (sinon boucle)
+  // évite boucle pull -> push
   const skipNextAutoPushRef = useRef(false);
+
+  // dernier updated_at du cloud qu’on a appliqué
+  const lastAppliedCloudUpdatedAtRef = useRef<number>(0);
 
   /* =====================
      ✅ CALLBACKS
@@ -55,12 +89,15 @@ const App: React.FC = () => {
     setCurrentView("SESSION_DETAIL");
   }, []);
 
+  // IMPORTANT : on “stamp” updatedAt à chaque save
   const handleSaveSession = useCallback(
     (session: WorkoutSession) => {
+      const stamped = { ...(session as any), updatedAt: nowIso() } as WorkoutSession;
+
       setSessions((prev) => {
-        const exists = prev.some((s) => s.id === session.id);
-        if (exists) return prev.map((s) => (s.id === session.id ? session : s));
-        return [...prev, session];
+        const exists = prev.some((s) => s.id === stamped.id);
+        if (exists) return prev.map((s) => (s.id === stamped.id ? stamped : s));
+        return [...prev, stamped];
       });
     },
     [setSessions]
@@ -68,6 +105,8 @@ const App: React.FC = () => {
 
   const handleDeleteSession = useCallback(
     (id: string) => {
+      // (option : tu peux marquer deletedAt plutôt que supprimer,
+      // mais on reste simple)
       setSessions((prev) => prev.filter((s) => s.id !== id));
       setCurrentView("SESSIONS_LIST");
     },
@@ -76,10 +115,12 @@ const App: React.FC = () => {
 
   const handleSaveTemplate = useCallback(
     (template: ExerciseTemplate) => {
+      const stamped = { ...(template as any), updatedAt: nowIso() } as ExerciseTemplate;
+
       setTemplates((prev) => {
-        const exists = prev.some((t) => t.id === template.id);
-        if (exists) return prev.map((t) => (t.id === template.id ? template : t));
-        return [...prev, template];
+        const exists = prev.some((t) => t.id === stamped.id);
+        if (exists) return prev.map((t) => (t.id === stamped.id ? stamped : t));
+        return [...prev, stamped];
       });
     },
     [setTemplates]
@@ -97,6 +138,33 @@ const App: React.FC = () => {
   }, []);
 
   /* =====================
+     ☁️ APPLY CLOUD (merge)
+  ===================== */
+  const applyCloudData = useCallback(
+    (cloudSessions: any[], cloudTemplates: any[], cloudUpdatedAt: string | null) => {
+      const cloudUpdatedAtNum = cloudUpdatedAt ? Date.parse(cloudUpdatedAt) : 0;
+
+      // si pas plus récent que ce qu’on a déjà appliqué, on peut ignorer
+      if (cloudUpdatedAtNum && cloudUpdatedAtNum <= lastAppliedCloudUpdatedAtRef.current) {
+        return;
+      }
+
+      // merge cloud -> local (par id & updatedAt)
+      const mergedSessions = mergeById<WorkoutSession>(sessions as any[], cloudSessions as any[]);
+      const mergedTemplates = mergeById<ExerciseTemplate>(templates as any[], cloudTemplates as any[]);
+
+      // on évite auto-push immédiat causé par setState
+      skipNextAutoPushRef.current = true;
+
+      setSessions(mergedSessions);
+      setTemplates(mergedTemplates);
+
+      lastAppliedCloudUpdatedAtRef.current = cloudUpdatedAtNum || Date.now();
+    },
+    [sessions, templates, setSessions, setTemplates]
+  );
+
+  /* =====================
      ☁️ SYNC MANUEL (boutons)
   ===================== */
   const handleSyncPull = useCallback(async () => {
@@ -104,29 +172,21 @@ const App: React.FC = () => {
     setSyncMsg("Téléchargement des données...");
     try {
       const cloud = await pullUserData();
-
-      // Important : on évite de re-push automatiquement juste après ce pull
-      skipNextAutoPushRef.current = true;
-
-      setSessions(cloud.sessions as WorkoutSession[]);
-      setTemplates(cloud.templates as ExerciseTemplate[]);
-      setSyncMsg("✅ Données récupérées depuis le cloud");
+      applyCloudData(cloud.sessions, cloud.templates, cloud.updated_at);
+      setSyncMsg("✅ Données cloud appliquées (merge)");
       setTimeout(() => setSyncMsg(null), 1500);
     } catch (e: any) {
       setSyncMsg("❌ Erreur sync ↓ : " + (e?.message ?? String(e)));
     } finally {
       setSyncing(false);
     }
-  }, [setSessions, setTemplates]);
+  }, [applyCloudData]);
 
   const handleSyncPush = useCallback(async () => {
     setSyncing(true);
     setSyncMsg("Envoi des données...");
     try {
-      await pushUserData(
-        sessions as WorkoutSession[],
-        templates as ExerciseTemplate[]
-      );
+      await pushUserData(sessions as any, templates as any);
       setSyncMsg("✅ Données envoyées vers le cloud");
       setTimeout(() => setSyncMsg(null), 1500);
     } catch (e: any) {
@@ -153,7 +213,7 @@ const App: React.FC = () => {
   }, []);
 
   /* =====================
-     ✅ AUTO-PULL au login
+     ✅ AUTO-PULL au login (avec merge)
   ===================== */
   useEffect(() => {
     if (!ready || !signedIn) return;
@@ -163,12 +223,7 @@ const App: React.FC = () => {
       setSyncMsg("Synchronisation…");
       try {
         const cloud = await pullUserData();
-
-        // Évite auto-push juste après pull
-        skipNextAutoPushRef.current = true;
-
-        setSessions(cloud.sessions as WorkoutSession[]);
-        setTemplates(cloud.templates as ExerciseTemplate[]);
+        applyCloudData(cloud.sessions, cloud.templates, cloud.updated_at);
         setSyncMsg(null);
       } catch (e: any) {
         setSyncMsg("❌ Sync auto: " + (e?.message ?? String(e)));
@@ -176,16 +231,14 @@ const App: React.FC = () => {
         setSyncing(false);
       }
     })();
-  }, [ready, signedIn, setSessions, setTemplates]);
+  }, [ready, signedIn, applyCloudData]);
 
   /* =====================
      ✅ AUTO-PUSH debounced
-     (1.2s après la dernière modif)
   ===================== */
   useEffect(() => {
     if (!ready || !signedIn) return;
 
-    // Si on vient de faire un pull, on skip une fois
     if (skipNextAutoPushRef.current) {
       skipNextAutoPushRef.current = false;
       return;
@@ -194,20 +247,36 @@ const App: React.FC = () => {
     const t = setTimeout(() => {
       (async () => {
         try {
-          await pushUserData(
-            sessions as WorkoutSession[],
-            templates as ExerciseTemplate[]
-          );
-          // silencieux (pas de msg à chaque save)
-        } catch (e) {
-          // option : afficher une erreur si tu veux
-          // setSyncMsg("❌ Auto-save: " + (e as any)?.message);
+          await pushUserData(sessions as any, templates as any);
+        } catch {
+          // silencieux
         }
       })();
     }, 1200);
 
     return () => clearTimeout(t);
   }, [ready, signedIn, sessions, templates]);
+
+  /* =====================
+     ✅ AUTO-PULL périodique (toutes les 20s)
+     - Pull cloud
+     - Si plus récent : merge dans local
+  ===================== */
+  useEffect(() => {
+    if (!ready || !signedIn) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const cloud = await pullUserData();
+        // merge uniquement si cloud est nouveau
+        applyCloudData(cloud.sessions, cloud.templates, cloud.updated_at);
+      } catch {
+        // silencieux
+      }
+    }, 20000);
+
+    return () => clearInterval(interval);
+  }, [ready, signedIn, applyCloudData]);
 
   /* =====================
      ⛔ GUARDS
@@ -244,10 +313,7 @@ const App: React.FC = () => {
             onSaveTemplate={handleSaveTemplate}
             onBack={() => {
               const session = sessions.find((s) => s.id === selectedSessionId);
-              if (
-                session &&
-                (session.isCompleted || new Date(session.date) < today)
-              ) {
+              if (session && (session.isCompleted || new Date(session.date) < today)) {
                 setCurrentView("HISTORY");
               } else {
                 setCurrentView("SESSIONS_LIST");
