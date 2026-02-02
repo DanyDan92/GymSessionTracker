@@ -1,15 +1,18 @@
 import React, { useState, useCallback, useEffect } from "react";
 import { WorkoutSession, ExerciseTemplate } from "./types";
 import useLocalStorage from "./hooks/useLocalStorage";
+
 import SessionList from "./components/SessionList";
 import SessionDetail from "./components/SessionDetail";
 import ExerciseLibrary from "./components/ExerciseLibrary";
+
 import { CalendarIcon } from "./components/icons/CalendarIcon";
 import { DumbbellIcon } from "./components/icons/DumbbellIcon";
 import { HistoryIcon } from "./components/icons/HistoryIcon";
 
 import { supabase } from "./supabaseClient";
 import { Auth } from "./Auth";
+import { pullUserData, pushUserData } from "./sync";
 
 type View = "SESSIONS_LIST" | "SESSION_DETAIL" | "EXERCISE_LIBRARY" | "HISTORY";
 
@@ -23,7 +26,8 @@ const App: React.FC = () => {
   /* =====================
      📦 LOCAL STORAGE
   ===================== */
-  const [sessions, setSessions] = useLocalStorage<WorkoutSession[]>("sessions", []);
+  const [sessions, setSessions] =
+    useLocalStorage<WorkoutSession[]>("sessions", []);
   const [templates, setTemplates] =
     useLocalStorage<ExerciseTemplate[]>("exerciseTemplates", []);
 
@@ -31,10 +35,17 @@ const App: React.FC = () => {
      🧭 NAVIGATION STATE
   ===================== */
   const [currentView, setCurrentView] = useState<View>("SESSIONS_LIST");
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [selectedSessionId, setSelectedSessionId] =
+    useState<string | null>(null);
 
   /* =====================
-     ✅ CALLBACKS (hooks)
+     ☁️ SYNC STATE
+  ===================== */
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+
+  /* =====================
+     ✅ CALLBACKS
   ===================== */
   const handleSelectSession = useCallback((id: string) => {
     setSelectedSessionId(id);
@@ -45,7 +56,9 @@ const App: React.FC = () => {
     (session: WorkoutSession) => {
       setSessions((prev) => {
         const exists = prev.some((s) => s.id === session.id);
-        if (exists) return prev.map((s) => (s.id === session.id ? session : s));
+        if (exists) {
+          return prev.map((s) => (s.id === session.id ? session : s));
+        }
         return [...prev, session];
       });
     },
@@ -64,7 +77,11 @@ const App: React.FC = () => {
     (template: ExerciseTemplate) => {
       setTemplates((prev) => {
         const exists = prev.some((t) => t.id === template.id);
-        if (exists) return prev.map((t) => (t.id === template.id ? template : t));
+        if (exists) {
+          return prev.map((t) =>
+            t.id === template.id ? template : t
+          );
+        }
         return [...prev, template];
       });
     },
@@ -83,6 +100,40 @@ const App: React.FC = () => {
   }, []);
 
   /* =====================
+     ☁️ SYNC ACTIONS
+  ===================== */
+  const handleSyncPull = useCallback(async () => {
+    setSyncing(true);
+    setSyncMsg("Téléchargement des données...");
+    try {
+      const cloud = await pullUserData();
+      setSessions(cloud.sessions as WorkoutSession[]);
+      setTemplates(cloud.templates as ExerciseTemplate[]);
+      setSyncMsg("✅ Données récupérées depuis le cloud");
+    } catch (e: any) {
+      setSyncMsg("❌ Erreur sync ↓ : " + (e?.message ?? String(e)));
+    } finally {
+      setSyncing(false);
+    }
+  }, [setSessions, setTemplates]);
+
+  const handleSyncPush = useCallback(async () => {
+    setSyncing(true);
+    setSyncMsg("Envoi des données...");
+    try {
+      await pushUserData(
+        sessions as WorkoutSession[],
+        templates as ExerciseTemplate[]
+      );
+      setSyncMsg("✅ Données envoyées vers le cloud");
+    } catch (e: any) {
+      setSyncMsg("❌ Erreur sync ↑ : " + (e?.message ?? String(e)));
+    } finally {
+      setSyncing(false);
+    }
+  }, [sessions, templates]);
+
+  /* =====================
      🔐 SUPABASE SESSION
   ===================== */
   useEffect(() => {
@@ -91,11 +142,15 @@ const App: React.FC = () => {
       setReady(true);
     });
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSignedIn(!!session);
-    });
+    const { data: sub } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setSignedIn(!!session);
+      }
+    );
 
-    return () => sub.subscription.unsubscribe();
+    return () => {
+      sub.subscription.unsubscribe();
+    };
   }, []);
 
   /* =====================
@@ -132,8 +187,14 @@ const App: React.FC = () => {
             onSaveSession={handleSaveSession}
             onSaveTemplate={handleSaveTemplate}
             onBack={() => {
-              const session = sessions.find((s) => s.id === selectedSessionId);
-              if (session && (session.isCompleted || new Date(session.date) < today)) {
+              const session = sessions.find(
+                (s) => s.id === selectedSessionId
+              );
+              if (
+                session &&
+                (session.isCompleted ||
+                  new Date(session.date) < today)
+              ) {
                 setCurrentView("HISTORY");
               } else {
                 setCurrentView("SESSIONS_LIST");
@@ -176,25 +237,47 @@ const App: React.FC = () => {
     }
   };
 
+  /* =====================
+     🧱 UI
+  ===================== */
   return (
     <div className="min-h-screen bg-gray-900 text-gray-200 font-sans flex flex-col">
       <header className="bg-gray-800/70 backdrop-blur-sm sticky top-0 z-20 shadow-lg">
-        <div className="max-w-4xl mx-auto px-4 flex items-center justify-between">
-          <h1 className="text-xl md:text-2xl font-bold text-emerald-400 py-4">
+        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+          <h1 className="text-xl md:text-2xl font-bold text-emerald-400">
             Gym Session Tracker
           </h1>
-          <button
-            onClick={handleSignOut}
-            className="text-sm px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-700/50 transition"
-          >
-            Déconnexion
-          </button>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleSyncPull}
+              disabled={syncing}
+              className="text-sm px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-700/50 disabled:opacity-50"
+            >
+              Sync ↓
+            </button>
+
+            <button
+              onClick={handleSyncPush}
+              disabled={syncing}
+              className="text-sm px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-700/50 disabled:opacity-50"
+            >
+              Sync ↑
+            </button>
+
+            <button
+              onClick={handleSignOut}
+              className="text-sm px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-700/50"
+            >
+              Déconnexion
+            </button>
+          </div>
         </div>
 
-        <nav className="flex justify-center gap-2 sm:gap-4 border-t border-gray-700">
+        <nav className="flex justify-center gap-4 border-t border-gray-700">
           <button
             onClick={() => setCurrentView("SESSIONS_LIST")}
-            className={`flex items-center gap-2 px-3 py-3 text-sm border-b-2 ${
+            className={`flex items-center gap-2 px-4 py-3 text-sm border-b-2 ${
               currentView === "SESSIONS_LIST"
                 ? "border-emerald-400 text-emerald-400"
                 : "border-transparent text-gray-400 hover:text-white"
@@ -205,7 +288,7 @@ const App: React.FC = () => {
 
           <button
             onClick={() => setCurrentView("HISTORY")}
-            className={`flex items-center gap-2 px-3 py-3 text-sm border-b-2 ${
+            className={`flex items-center gap-2 px-4 py-3 text-sm border-b-2 ${
               currentView === "HISTORY"
                 ? "border-emerald-400 text-emerald-400"
                 : "border-transparent text-gray-400 hover:text-white"
@@ -216,7 +299,7 @@ const App: React.FC = () => {
 
           <button
             onClick={() => setCurrentView("EXERCISE_LIBRARY")}
-            className={`flex items-center gap-2 px-3 py-3 text-sm border-b-2 ${
+            className={`flex items-center gap-2 px-4 py-3 text-sm border-b-2 ${
               currentView === "EXERCISE_LIBRARY"
                 ? "border-emerald-400 text-emerald-400"
                 : "border-transparent text-gray-400 hover:text-white"
@@ -225,6 +308,12 @@ const App: React.FC = () => {
             <DumbbellIcon /> Exercices
           </button>
         </nav>
+
+        {syncMsg && (
+          <div className="max-w-4xl mx-auto px-4 py-2 text-sm text-gray-300">
+            {syncMsg}
+          </div>
+        )}
       </header>
 
       <main className="flex-grow p-4 md:p-8">
