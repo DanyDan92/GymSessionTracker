@@ -238,12 +238,13 @@ const App: React.FC = () => {
   ===================== */
   useEffect(() => {
     if (!ready || !signedIn) return;
-
+    if (syncing) return; // ✅ évite push pendant pull
+  
     if (skipNextAutoPushRef.current) {
       skipNextAutoPushRef.current = false;
       return;
     }
-
+  
     const t = setTimeout(() => {
       (async () => {
         try {
@@ -253,9 +254,9 @@ const App: React.FC = () => {
         }
       })();
     }, 1200);
-
+  
     return () => clearTimeout(t);
-  }, [ready, signedIn, sessions, templates]);
+  }, [ready, signedIn, syncing, sessions, templates]);
 
   /* =====================
      ✅ AUTO-PULL périodique (toutes les 20s)
