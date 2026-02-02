@@ -73,7 +73,11 @@ export function Auth() {
             )}
 
             <button
-              onClick={signIn}
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                signIn();
+              }}
               disabled={loading || !email || !password}
               className="w-full rounded-xl bg-emerald-500 text-gray-900 font-semibold py-3
                          hover:bg-emerald-400 transition disabled:opacity-50 disabled:cursor-not-allowed"
@@ -81,8 +85,12 @@ export function Auth() {
               {loading ? "Chargement..." : "Se connecter"}
             </button>
 
-            <button
-              onClick={signUp}
+           <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                signUp();
+              }}
               disabled={loading || !email || !password}
               className="w-full rounded-xl border border-gray-700 text-gray-200 py-3
                          hover:bg-gray-700/50 transition disabled:opacity-50 disabled:cursor-not-allowed"
