@@ -22,48 +22,28 @@ const App: React.FC = () => {
 
   /* =====================
      📦 LOCAL STORAGE
-     (⚠️ DOIT rester avant les return conditionnels)
   ===================== */
   const [sessions, setSessions] = useLocalStorage<WorkoutSession[]>('sessions', []);
   const [templates, setTemplates] = useLocalStorage<ExerciseTemplate[]>('exerciseTemplates', []);
 
   /* =====================
      🧭 NAVIGATION STATE
-     (⚠️ DOIT rester avant les return conditionnels)
   ===================== */
   const [currentView, setCurrentView] = useState<View>('SESSIONS_LIST');
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
 
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setSignedIn(!!data.session);
-      setReady(true);
-    });
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSignedIn(!!session);
-    });
-
-    return () => {
-      sub.subscription.unsubscribe();
-    };
-  }, []);
-
-  // ✅ Maintenant c'est safe : tous les hooks ont déjà été appelés
-  if (!ready) return null;
-  if (!signedIn) return <Auth />;
-
-  const handleSelectSession = (id: string) => {
+  /* =====================
+     ✅ CALLBACKS (hooks) — DOIVENT être avant les retours conditionnels
+  ===================== */
+  const handleSelectSession = useCallback((id: string) => {
     setSelectedSessionId(id);
     setCurrentView('SESSION_DETAIL');
-  };
+  }, []);
 
   const handleSaveSession = useCallback((session: WorkoutSession) => {
     setSessions(prev => {
       const exists = prev.some(s => s.id === session.id);
-      if (exists) {
-        return prev.map(s => (s.id === session.id ? session : s));
-      }
+      if (exists) return prev.map(s => (s.id === session.id ? session : s));
       return [...prev, session];
     });
   }, [setSessions]);
@@ -76,9 +56,7 @@ const App: React.FC = () => {
   const handleSaveTemplate = useCallback((template: ExerciseTemplate) => {
     setTemplates(prev => {
       const exists = prev.some(t => t.id === template.id);
-      if (exists) {
-        return prev.map(t => (t.id === template.id ? template : t));
-      }
+      if (exists) return prev.map(t => (t.id === template.id ? template : t));
       return [...prev, template];
     });
   }, [setTemplates]);
@@ -87,20 +65,42 @@ const App: React.FC = () => {
     setTemplates(prev => prev.filter(t => t.id !== id));
   }, [setTemplates]);
 
+  /* =====================
+     🔐 SUPABASE SESSION
+  ===================== */
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSignedIn(!!data.session);
+      setReady(true);
+    });
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSignedIn(!!session);
+    });
+
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  /* =====================
+     ⛔ GUARDS (après TOUS les hooks)
+  ===================== */
+  if (!ready) return null;
+  if (!signedIn) return <Auth />;
+
+  /* =====================
+     🖼️ RENDER VIEW
+  ===================== */
   const renderView = () => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const upcomingSessions = sessions.filter(
-      s => !s.isCompleted && new Date(s.date) >= today
-    );
-    const pastSessions = sessions.filter(
-      s => s.isCompleted || new Date(s.date) < today
-    );
+    const upcomingSessions = sessions.filter(s => !s.isCompleted && new Date(s.date) >= today);
+    const pastSessions = sessions.filter(s => s.isCompleted || new Date(s.date) < today);
 
     switch (currentView) {
       case 'SESSION_DETAIL':
         if (!selectedSessionId) {
+          // NOTE: idéalement on évite setState dans render, mais on laisse pour l'instant
           setCurrentView('SESSIONS_LIST');
           return null;
         }
@@ -157,6 +157,9 @@ const App: React.FC = () => {
     }
   };
 
+  /* =====================
+     🧱 UI
+  ===================== */
   return (
     <div className="min-h-screen bg-gray-900 text-gray-200 font-sans flex flex-col">
       <header className="bg-gray-800/70 backdrop-blur-sm sticky top-0 z-20 shadow-lg">
