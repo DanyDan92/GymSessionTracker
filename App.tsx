@@ -19,7 +19,7 @@ type View = "SESSIONS_LIST" | "SESSION_DETAIL" | "EXERCISE_LIBRARY" | "HISTORY";
 /* =====================
    MERGE / CONFLICT RESOLUTION
    - 1 item = 1 id
-   - on garde l'item le plus récent (updatedAt)
+   - on garde l’item le plus récent (updatedAt)
 ===================== */
 function getUpdatedAt(x: any): number {
   const v = x?.updatedAt ?? x?.updated_at ?? null;
@@ -65,6 +65,16 @@ const App: React.FC = () => {
   const [sessions, setSessions] = useLocalStorage<WorkoutSession[]>("sessions", []);
   const [templates, setTemplates] = useLocalStorage<ExerciseTemplate[]>("exerciseTemplates", []);
 
+  // Refs toujours à jour (utile pour push dans des callbacks)
+  const sessionsRef = useRef<WorkoutSession[]>(sessions);
+  const templatesRef = useRef<ExerciseTemplate[]>(templates);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+  useEffect(() => {
+    templatesRef.current = templates;
+  }, [templates]);
+
   /* =====================
      🧭 NAVIGATION STATE
   ===================== */
@@ -75,59 +85,10 @@ const App: React.FC = () => {
      ☁️ SYNC REFS (discrets)
   ===================== */
   const pullingRef = useRef(false);
+  const pushingRef = useRef(false);
   const didLoginPullRef = useRef(false);
   const didFirstInteractionPullRef = useRef(false);
   const lastAppliedCloudUpdatedAtRef = useRef<number>(0);
-
-  /* =====================
-     ✅ CALLBACKS (no hooks in conditional)
-  ===================== */
-  const handleSelectSession = useCallback((id: string) => {
-    setSelectedSessionId(id);
-    setCurrentView("SESSION_DETAIL");
-  }, []);
-
-  // Stamp updatedAt à chaque modification locale
-  const handleSaveSession = useCallback(
-    (session: WorkoutSession) => {
-      const stamped = { ...(session as any), updatedAt: nowIso() } as WorkoutSession;
-
-      setSessions((prev) => {
-        const exists = prev.some((s) => s.id === stamped.id);
-        if (exists) return prev.map((s) => (s.id === stamped.id ? stamped : s));
-        return [...prev, stamped];
-      });
-    },
-    [setSessions]
-  );
-
-  const handleDeleteSession = useCallback(
-    (id: string) => {
-      setSessions((prev) => prev.filter((s) => s.id !== id));
-      setCurrentView("SESSIONS_LIST");
-    },
-    [setSessions]
-  );
-
-  const handleSaveTemplate = useCallback(
-    (template: ExerciseTemplate) => {
-      const stamped = { ...(template as any), updatedAt: nowIso() } as ExerciseTemplate;
-
-      setTemplates((prev) => {
-        const exists = prev.some((t) => t.id === stamped.id);
-        if (exists) return prev.map((t) => (t.id === stamped.id ? stamped : t));
-        return [...prev, stamped];
-      });
-    },
-    [setTemplates]
-  );
-
-  const handleDeleteTemplate = useCallback(
-    (id: string) => {
-      setTemplates((prev) => prev.filter((t) => t.id !== id));
-    },
-    [setTemplates]
-  );
 
   /* =====================
      APPLY CLOUD (merge discret)
@@ -153,6 +114,7 @@ const App: React.FC = () => {
 
   /* =====================
      PULL DISCRET (avec lock)
+     - appelé au login, changement d'onglet, 1ère interaction
   ===================== */
   const safePull = useCallback(async () => {
     if (pullingRef.current) return;
@@ -168,17 +130,100 @@ const App: React.FC = () => {
   }, [applyCloudData]);
 
   /* =====================
-     PUSH (uniquement via bouton "Sauvegarder")
+     PUSH DISCRET (avec lock)
+     - appelé uniquement via actions utilisateur (save/validate/finish/delete)
   ===================== */
-  const handleSaveToCloud = useCallback(async () => {
+  const safePush = useCallback(async (nextSessions: WorkoutSession[], nextTemplates: ExerciseTemplate[]) => {
+    if (pushingRef.current) return;
+    pushingRef.current = true;
     try {
-      await pushUserData(sessions as any, templates as any);
-      // invisible : pas de message UI
+      await pushUserData(nextSessions as any, nextTemplates as any);
     } catch {
-      // invisible : pas de message UI
-      // (si tu veux, on peut logger console.error)
+      // silencieux
+    } finally {
+      pushingRef.current = false;
     }
-  }, [sessions, templates]);
+  }, []);
+
+  /* =====================
+     ✅ CALLBACKS MUTATIONS
+     => PUSH AU CLOUD à chaque action "validante"
+  ===================== */
+
+  const handleSelectSession = useCallback((id: string) => {
+    setSelectedSessionId(id);
+    setCurrentView("SESSION_DETAIL");
+    // Optionnel: pull discret quand on ouvre une séance
+    safePull();
+  }, [safePull]);
+
+  // IMPORTANT :
+  // - Cette fonction est appelée quand tu appuies sur :
+  //   "Sauvegarder", "Valider la série", "Terminer la séance"
+  //   (si SessionDetail appelle bien onSaveSession)
+  const handleSaveSession = useCallback(
+    (session: WorkoutSession) => {
+      const stamped = { ...(session as any), updatedAt: nowIso() } as WorkoutSession;
+
+      setSessions((prev) => {
+        const exists = prev.some((s) => s.id === stamped.id);
+        const nextSessions = exists
+          ? prev.map((s) => (s.id === stamped.id ? stamped : s))
+          : [...prev, stamped];
+
+        // push avec nextSessions + templates courant
+        void safePush(nextSessions, templatesRef.current);
+
+        return nextSessions;
+      });
+    },
+    [setSessions, safePush]
+  );
+
+  const handleDeleteSession = useCallback(
+    (id: string) => {
+      setSessions((prev) => {
+        const nextSessions = prev.filter((s) => s.id !== id);
+        void safePush(nextSessions, templatesRef.current);
+        return nextSessions;
+      });
+      setCurrentView("SESSIONS_LIST");
+    },
+    [setSessions, safePush]
+  );
+
+  // IMPORTANT :
+  // - Cette fonction est appelée quand tu appuies sur "Créer/Sauvegarder un exercice"
+  //   (si ExerciseLibrary appelle bien onSaveTemplate)
+  const handleSaveTemplate = useCallback(
+    (template: ExerciseTemplate) => {
+      const stamped = { ...(template as any), updatedAt: nowIso() } as ExerciseTemplate;
+
+      setTemplates((prev) => {
+        const exists = prev.some((t) => t.id === stamped.id);
+        const nextTemplates = exists
+          ? prev.map((t) => (t.id === stamped.id ? stamped : t))
+          : [...prev, stamped];
+
+        // push avec sessions courant + nextTemplates
+        void safePush(sessionsRef.current, nextTemplates);
+
+        return nextTemplates;
+      });
+    },
+    [setTemplates, safePush]
+  );
+
+  const handleDeleteTemplate = useCallback(
+    (id: string) => {
+      setTemplates((prev) => {
+        const nextTemplates = prev.filter((t) => t.id !== id);
+        void safePush(sessionsRef.current, nextTemplates);
+        return nextTemplates;
+      });
+    },
+    [setTemplates, safePush]
+  );
 
   /* =====================
      🔐 SUPABASE SESSION
@@ -204,12 +249,11 @@ const App: React.FC = () => {
     if (didLoginPullRef.current) return;
     didLoginPullRef.current = true;
 
-    safePull();
+    void safePull();
   }, [ready, signedIn, safePull]);
 
   /* =====================
-     ✅ PULL au premier clic/tap (1 fois)
-     (utile si cloud change pendant que l'app est ouverte)
+     ✅ PULL à la 1ère interaction (1 fois)
   ===================== */
   useEffect(() => {
     if (!ready || !signedIn) return;
@@ -217,7 +261,7 @@ const App: React.FC = () => {
     const onFirstInteraction = () => {
       if (didFirstInteractionPullRef.current) return;
       didFirstInteractionPullRef.current = true;
-      safePull();
+      void safePull();
     };
 
     window.addEventListener("pointerdown", onFirstInteraction, { passive: true });
@@ -230,6 +274,16 @@ const App: React.FC = () => {
   }, [ready, signedIn, safePull]);
 
   /* =====================
+     LOGOUT (reset flags)
+  ===================== */
+  const handleSignOut = useCallback(async () => {
+    didLoginPullRef.current = false;
+    didFirstInteractionPullRef.current = false;
+    lastAppliedCloudUpdatedAtRef.current = 0;
+    await supabase.auth.signOut();
+  }, []);
+
+  /* =====================
      ⛔ GUARDS
   ===================== */
   if (!ready) return null;
@@ -240,8 +294,7 @@ const App: React.FC = () => {
   ===================== */
   const setViewWithPull = (v: View) => {
     setCurrentView(v);
-    // pull discret à chaque changement de tab
-    safePull();
+    void safePull();
   };
 
   /* =====================
@@ -303,6 +356,7 @@ const App: React.FC = () => {
           />
         );
 
+      case "SESSIONS_LIST":
       default:
         return (
           <SessionList
@@ -327,28 +381,12 @@ const App: React.FC = () => {
             Gym Session Tracker
           </h1>
 
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleSaveToCloud}
-              className="text-sm px-3 py-2 rounded-xl bg-emerald-500 text-gray-900 font-semibold hover:bg-emerald-400 transition"
-              title="Envoie tes données vers le cloud"
-            >
-              Sauvegarder
-            </button>
-
-            <button
-              onClick={async () => {
-                // reset flags pour confirmer une sync propre à la prochaine connexion
-                didLoginPullRef.current = false;
-                didFirstInteractionPullRef.current = false;
-                lastAppliedCloudUpdatedAtRef.current = 0;
-                await supabase.auth.signOut();
-              }}
-              className="text-sm px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-700/50 transition"
-            >
-              Déconnexion
-            </button>
-          </div>
+          <button
+            onClick={handleSignOut}
+            className="text-sm px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-700/50 transition"
+          >
+            Déconnexion
+          </button>
         </div>
 
         <nav className="flex justify-center gap-4 border-t border-gray-700">
